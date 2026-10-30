@@ -47,16 +47,18 @@ class AgentExecutor:
             if "final_answer" in data and not trace and not nudged:
                 nudged = True  # an agent must ground its answer in at least one tool result
                 messages += [{"role": "assistant", "content": json.dumps(data)},
-                             {"role": "user", "content": "Do not answer from memory. Call list_files, then read the data with a tool first."}]
+                             {"role": "user", "content": "Do not answer from memory. Call list_files or an audit tool (e.g. categorize_transactions, detect_duplicates, detect_anomalies, detect_subscriptions, plan_budget) to inspect the data first."}]
                 continue
             if "final_answer" in data:
                 if verbose:
                     print(f"[Thought] {thought}\n[Final] {data['final_answer']}")
                 return str(data["final_answer"]), trace
-            name, args = data.get("action"), data.get("args") or {}
+            name = data.get("action")
+            raw_args = data.get("args")
+            args = raw_args if isinstance(raw_args, dict) else {}
             key = (name, json.dumps(args, sort_keys=True, default=str))
             seen[key] = seen.get(key, 0) + 1
-            observation = self._call_tool(name, args)
+            observation = self._call_tool(name, args if isinstance(raw_args, dict) else raw_args)
             trace.append({"thought": thought, "tool": name, "args": args, "observation": observation[:2000]})
             if verbose:
                 print(f"[Thought] {thought}\n[Action] {name}({args})\n[Observation] {observation[:300]}")
@@ -65,6 +67,8 @@ class AgentExecutor:
         return self._wrap_up(messages), trace
 
     def _call_tool(self, name, args):
+        if not isinstance(args, dict):
+            return f"ERROR: 'args' must be a JSON object, got {type(args).__name__}."
         tool = self.tools.get(name)
         if tool is None:
             return f"ERROR: unknown tool '{name}'. Available: {', '.join(self.tools)}"
@@ -75,6 +79,7 @@ class AgentExecutor:
 
     def _wrap_up(self, messages):
         """Out of steps: ask once for a final answer from what we have."""
-        messages.append({"role": "user", "content": "Step limit reached. Reply with a final_answer JSON now."})
-        data = parse_json(self.llm.generate(self.system, messages)) or {}
-        return str(data.get("final_answer") or "I could not finish within the step limit.")
+        messages.append({"role": "user", "content": "Step limit reached. Synthesize a grounded final_answer from gathered observations now."})
+        reply = self.llm.generate(self.system, messages)
+        data = parse_json(reply) or {}
+        return str(data.get("final_answer") or reply or "I could not finish within the step limit.")
